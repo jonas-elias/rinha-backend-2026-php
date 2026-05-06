@@ -21,7 +21,7 @@ final class Data
 {
     /** Total de vetores reais (sem padding). */
     public static int $n = 0;
-    /** Centroides (= 4096). */
+    /** Centroides (default 2048). */
     public static int $k = 0;
     /** Vetores arredondados para múltiplo de 8 (slots por bloco). */
     public static int $paddedN = 0;

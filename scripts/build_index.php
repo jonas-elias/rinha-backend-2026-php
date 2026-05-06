@@ -19,8 +19,8 @@ declare(strict_types=1);
 ini_set('memory_limit', '1G');
 
 const D = 14;
-const K = 4096;
-const N_ITER = 25;
+const K = 2048;
+const N_ITER = 20;
 const SAMPLE_INIT = 50_000;
 const VECTOR_QUANT_SCALE = 10000.0;
 const I16_MAX = 32767;
