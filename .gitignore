@@ -1,0 +1,12 @@
+/data/index.bin
+/data/index_q.bin
+/data/refs.bin
+/data/refs_tiny.bin
+/data/index_tiny.bin
+/resources/references.json.gz
+/certs/*.crt
+vendor/
+*.so
+.DS_Store
+.idea/
+.vscode/

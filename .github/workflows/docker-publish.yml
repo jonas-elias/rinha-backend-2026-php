@@ -1,0 +1,174 @@
+name: build & push runtime image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag adicional além de 'latest' e do SHA curto"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "lib/**"
+      - "php/**"
+      - "scripts/**"
+      - "haproxy.cfg"
+      - "docker-compose.yml"
+      - ".github/workflows/docker-publish.yml"
+
+env:
+  IMAGE: ${{ vars.DOCKERHUB_USERNAME }}/rinha-2026-php
+  REFERENCES_URL: https://raw.githubusercontent.com/zanfranceschi/rinha-de-backend-2026/main/resources/references.json.gz
+
+permissions:
+  contents: read
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      sha_tag: ${{ steps.meta.outputs.sha_tag }}
+    steps:
+      - name: Pre-flight — fail fast if Docker Hub vars/secrets are missing
+        run: |
+          : "${DH_USER:?vars.DOCKERHUB_USERNAME is empty — set it in repo Settings → Secrets and variables → Actions → Variables}"
+          : "${DH_TOKEN:?secrets.DOCKERHUB_TOKEN is empty — set it in repo Settings → Secrets and variables → Actions → Secrets}"
+          echo "username=${DH_USER}"
+        env:
+          DH_USER: ${{ vars.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: actions/checkout@v4
+
+      - name: Compute tags
+        id: meta
+        run: |
+          short_sha=$(echo "${{ github.sha }}" | cut -c1-7)
+          extra="${{ github.event.inputs.tag }}"
+          tags="${IMAGE}:latest,${IMAGE}:${short_sha}"
+          if [ -n "${extra}" ]; then
+            tags="${tags},${IMAGE}:${extra}"
+          fi
+          {
+            echo "tags=${tags}"
+            echo "sha_tag=${short_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download references.json.gz from upstream
+        run: |
+          mkdir -p resources
+          curl -fsSL --retry 3 --retry-delay 5 \
+            "${REFERENCES_URL}" -o resources/references.json.gz
+          ls -la resources/references.json.gz
+          # Sanity: it's a gzip stream
+          file resources/references.json.gz | grep -qi gzip
+
+      - name: Drop corp ZScaler cert step (CI runner doesn't need it)
+        run: |
+          # The Dockerfile copies certs/ for ZScaler MITM at the dev host.
+          # On GitHub-hosted runners we don't have/need them. Empty dir is fine
+          # because update-ca-certificates is a no-op on empty input.
+          mkdir -p certs
+          rm -f certs/*.crt
+          : > certs/.keep
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & push runtime image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  verify:
+    needs: build-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull pushed image (proves Docker Hub has it)
+        env:
+          IMG: ${{ vars.DOCKERHUB_USERNAME }}/rinha-2026-php:${{ needs.build-push.outputs.sha_tag }}
+        run: |
+          docker pull "$IMG"
+          docker image inspect "$IMG" --format \
+            'image={{.RepoTags}} size={{.Size}} created={{.Created}}'
+
+      - name: Run a single api container and smoke /ready + /fraud-score
+        env:
+          IMG: ${{ vars.DOCKERHUB_USERNAME }}/rinha-2026-php:${{ needs.build-push.outputs.sha_tag }}
+        run: |
+          set -euo pipefail
+          # Bind the UDS to a host path so we can curl it from the runner.
+          mkdir -p /tmp/sock
+          chmod 777 /tmp/sock
+          docker run -d --name api \
+            -e SOCK=/run/sock/api.sock \
+            -e INDEX_PATH=/app/data/index.bin \
+            -v /tmp/sock:/run/sock \
+            "$IMG"
+
+          # Wait for the socket to appear
+          for i in $(seq 1 30); do
+            if [ -S /tmp/sock/api.sock ]; then
+              echo "socket ready after ${i}s"; break
+            fi
+            sleep 1
+            if [ "$i" = "30" ]; then
+              echo "::error::socket never appeared"
+              docker logs api
+              exit 1
+            fi
+          done
+
+          docker logs api | tail -20
+
+          # /ready
+          curl -fsS --unix-socket /tmp/sock/api.sock http://localhost/ready \
+            -o /dev/null -w 'ready=%{http_code}\n'
+
+          # /fraud-score with the first example payload
+          payload=$(jq -c '.[0]' resources/example-payloads.json)
+          resp=$(curl -fsS --unix-socket /tmp/sock/api.sock \
+            -H 'Content-Type: application/json' \
+            -X POST --data "$payload" \
+            http://localhost/fraud-score)
+          echo "response: $resp"
+          echo "$resp" | jq -e '.approved != null and .fraud_score != null' >/dev/null
+
+          docker rm -f api >/dev/null
+
+      - name: Summary
+        run: |
+          {
+            echo "## ✅ Image published & verified"
+            echo
+            echo "- **Image**: \`${{ vars.DOCKERHUB_USERNAME }}/rinha-2026-php\`"
+            echo "- **Tags**: \`latest\`, \`${{ needs.build-push.outputs.sha_tag }}\`"
+            echo "- **Digest**: \`${{ needs.build-push.outputs.digest }}\`"
+            echo "- Pulled successfully from Docker Hub"
+            echo "- \`/ready\` returned 200"
+            echo "- \`/fraud-score\` returned a valid JSON body"
+            echo
+            echo "### Local pull"
+            echo '```'
+            echo "docker pull ${{ vars.DOCKERHUB_USERNAME }}/rinha-2026-php:latest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
