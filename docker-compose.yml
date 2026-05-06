@@ -1,0 +1,60 @@
+services:
+  api1:
+    image: jonaselias/rinha-2026-php:latest
+    hostname: api1
+    environment:
+      SOCK: /run/sock/api1.sock
+      INDEX_PATH: /app/data/index_q.bin
+    volumes:
+      - sock:/run/sock
+    networks:
+      - rinha
+    deploy:
+      resources:
+        limits:
+          cpus: "0.4"
+          memory: "165MB"
+
+  api2:
+    image: jonaselias/rinha-2026-php:latest
+    hostname: api2
+    environment:
+      SOCK: /run/sock/api2.sock
+      INDEX_PATH: /app/data/index_q.bin
+    volumes:
+      - sock:/run/sock
+    networks:
+      - rinha
+    deploy:
+      resources:
+        limits:
+          cpus: "0.4"
+          memory: "165MB"
+
+  lb:
+    image: haproxy:2.9-alpine
+    depends_on:
+      - api1
+      - api2
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - sock:/run/sock
+    networks:
+      - rinha
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: "20MB"
+
+volumes:
+  sock:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+
+networks:
+  rinha:
+    driver: bridge

@@ -1,0 +1,7 @@
+{
+    "participants": ["Jonas Elias"],
+    "social": ["https://github.com/jonas-elias", "https://www.linkedin.com/in/jonas-elias/"],
+    "source-code-repo": "https://github.com/jonas-elias/rinha-backend-2026-php",
+    "stack": ["php", "swoole", "opcache-jit", "haproxy"],
+    "open_to_work": true
+}
