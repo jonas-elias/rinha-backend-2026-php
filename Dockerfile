@@ -13,10 +13,11 @@ COPY certs/ /usr/local/share/ca-certificates/
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     update-ca-certificates 2>/dev/null || true
 
-# JIT acelera o k-means em ~3-5x. pcntl é built-in.
+# JIT acelera o k-means em ~3-5x. pcntl precisa ser instalado.
 RUN echo "opcache.enable_cli=1\nopcache.jit_buffer_size=128M\nopcache.jit=tracing\nmemory_limit=2G" \
     > /usr/local/etc/php/conf.d/zz-build.ini && \
-    docker-php-ext-enable opcache
+    docker-php-ext-install pcntl && \
+    docker-php-ext-enable opcache pcntl
 
 WORKDIR /work
 COPY scripts/preprocess.php ./preprocess.php
