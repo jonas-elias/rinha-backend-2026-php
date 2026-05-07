@@ -131,16 +131,21 @@ final class Knn
 
         foreach ($probes as $ci) {
             $startBlk = $offsets[$ci];
-            $endBlk = $offsets[$ci + 1];
+            $endBlk   = $offsets[$ci + 1];
+            $nBlocks  = $endBlk - $startBlk;
+            if ($nBlocks === 0) {
+                continue;
+            }
 
-            for ($bi = $startBlk; $bi < $endBlk; $bi++) {
-                // 1 unpack/bloco: 112 int16 (8 vetores × 14 dims, AoS por vetor).
-                $arr = unpack('s112', $blocks, $bi * 224);
-                $vBase = $bi * 8;
+            // One unpack call for the entire probe instead of nBlocks calls.
+            $arr  = unpack('s' . ($nBlocks * 112), $blocks, $startBlk * 224);
+            $aIdx = 1; // unpack is 1-indexed
+            $vBase = $startBlk * 8;
 
+            for ($bi = 0; $bi < $nBlocks; $bi++) {
                 for ($s = 0; $s < 8; $s++) {
-                    $b = $s * 14 + 1; // 1-indexed
-                    $a0 = $arr[$b] - $q0;
+                    $b = $aIdx + $s * 14;
+                    $a0 = $arr[$b]   - $q0;
                     $a1 = $arr[$b+1] - $q1;
                     $a2 = $arr[$b+2] - $q2;
                     $a3 = $arr[$b+3] - $q3;
@@ -153,8 +158,8 @@ final class Knn
                     if ($d >= $worstVal) {
                         continue;
                     }
-                    $a8 = $arr[$b+8] - $q8;
-                    $a9 = $arr[$b+9] - $q9;
+                    $a8  = $arr[$b+8]  - $q8;
+                    $a9  = $arr[$b+9]  - $q9;
                     $a10 = $arr[$b+10] - $q10;
                     $a11 = $arr[$b+11] - $q11;
                     $a12 = $arr[$b+12] - $q12;
@@ -165,7 +170,6 @@ final class Knn
                         continue;
                     }
 
-                    // Insere no top-5 e re-encontra o pior.
                     $top5d[$worstIdx] = $d;
                     $top5l[$worstIdx] = ord($labels[$vBase + $s]);
 
@@ -177,6 +181,8 @@ final class Knn
                     $worstIdx = $wi;
                     $worstVal = $w;
                 }
+                $aIdx  += 112;
+                $vBase += 8;
             }
         }
 
@@ -196,7 +202,7 @@ final class Knn
     public static function warmup(): void
     {
         $state = 0x12345678;
-        for ($q = 0; $q < 500; $q++) {
+        for ($q = 0; $q < 100; $q++) {
             $vec = [];
             for ($i = 0; $i < 14; $i++) {
                 $state = ($state * 1664525 + 1013904223) & 0xFFFFFFFF;

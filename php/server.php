@@ -28,7 +28,7 @@ fwrite(STDERR, sprintf("[server] warmup %.2f ms\n", (hrtime(true) - $tw) / 1e6))
 $server = new Swoole\Http\Server($sock, 0, SWOOLE_BASE, SWOOLE_SOCK_UNIX_STREAM);
 
 $server->set([
-    'worker_num'        => 2,
+    'worker_num'        => 4,
     'reactor_num'       => 1,
     'tcp_fastopen'      => true,
     'open_tcp_nodelay'  => true,
