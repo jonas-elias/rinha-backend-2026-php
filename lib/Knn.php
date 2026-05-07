@@ -12,7 +12,7 @@ namespace App;
  */
 final class Knn
 {
-    private const FAST_NPROBE = 8;
+    private const FAST_NPROBE = 4;
     private const FULL_NPROBE = 24;
     private const D = 14;
     /** Sentinela INF (int 64). */
