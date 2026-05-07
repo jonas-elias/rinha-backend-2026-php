@@ -8,6 +8,9 @@
  *   4. Mantém heap de 5 vizinhos mais próximos; retorna contagem de label=1.
  *   5. Se count ∈ {2,3} (edge case), repete com FULL_NPROBE para maior acurácia.
  *
+ * load_index() carrega o índice diretamente em heap C, sem passar por strings PHP,
+ * evitando pico de memória de 2x o tamanho do índice durante a inicialização.
+ *
  * Compilar: gcc -O3 -march=x86-64-v2 -shared -fPIC -o knn.so knn.c -lm
  */
 
@@ -15,6 +18,97 @@
 #include <stddef.h>
 #include <float.h>
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ============================================================
+ * Estrutura do índice IVF6 carregada em memória C.
+ * ============================================================ */
+typedef struct {
+    float*    centroids;  /* float[k * 14] */
+    int16_t*  blocks;     /* int16_t[padded_n * 14] */
+    uint8_t*  labels;     /* uint8_t[padded_n] */
+    int32_t*  offsets;    /* int32_t[k + 1] */
+    int32_t   n;
+    int32_t   k;
+    int32_t   padded_n;
+} IvfIndex;
+
+/*
+ * Lê o arquivo índice IVF6 diretamente para heap C usando fread(),
+ * sem criar strings PHP intermediárias. Retorna NULL em caso de falha.
+ * Evita o pico de memória de ~166 MB que causa OOM no servidor de teste.
+ */
+IvfIndex* load_index(const char* path)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+
+    char magic[4];
+    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "IVF6", 4) != 0) {
+        fclose(f); return NULL;
+    }
+
+    uint32_t hdr[3]; /* n, k, d */
+    if (fread(hdr, 4, 3, f) != 3) { fclose(f); return NULL; }
+    uint32_t n = hdr[0], k = hdr[1], d = hdr[2];
+    if (d != 14) { fclose(f); return NULL; }
+
+    IvfIndex* idx = (IvfIndex*)calloc(1, sizeof(IvfIndex));
+    if (!idx) { fclose(f); return NULL; }
+    idx->n = (int32_t)n;
+    idx->k = (int32_t)k;
+
+    /* Centroides: k * d floats */
+    size_t c_elems = (size_t)k * d;
+    idx->centroids = (float*)malloc(c_elems * sizeof(float));
+    if (!idx->centroids || fread(idx->centroids, sizeof(float), c_elems, f) != c_elems)
+        goto fail;
+
+    /* Offsets: (k+1) int32 */
+    idx->offsets = (int32_t*)malloc((k + 1) * sizeof(int32_t));
+    if (!idx->offsets || fread(idx->offsets, sizeof(int32_t), k + 1, f) != k + 1)
+        goto fail;
+
+    /* padded_n = last_offset * 8 */
+    uint32_t total_blocks = (uint32_t)idx->offsets[k];
+    uint32_t padded_n = total_blocks * 8;
+    idx->padded_n = (int32_t)padded_n;
+
+    /* Labels: padded_n bytes */
+    idx->labels = (uint8_t*)malloc(padded_n);
+    if (!idx->labels || fread(idx->labels, 1, padded_n, f) != padded_n)
+        goto fail;
+
+    /* Blocks: padded_n * d int16 */
+    size_t b_elems = (size_t)padded_n * d;
+    idx->blocks = (int16_t*)malloc(b_elems * sizeof(int16_t));
+    if (!idx->blocks || fread(idx->blocks, sizeof(int16_t), b_elems, f) != b_elems)
+        goto fail;
+
+    fclose(f);
+    return idx;
+
+fail:
+    fclose(f);
+    free(idx->centroids);
+    free(idx->offsets);
+    free(idx->labels);
+    free(idx->blocks);
+    free(idx);
+    return NULL;
+}
+
+void free_index(IvfIndex* idx)
+{
+    if (!idx) return;
+    free(idx->centroids);
+    free(idx->blocks);
+    free(idx->labels);
+    free(idx->offsets);
+    free(idx);
+}
 
 #define DIMS        14
 #define MAX_NPROBE  64
