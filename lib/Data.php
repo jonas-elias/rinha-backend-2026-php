@@ -4,39 +4,40 @@ declare(strict_types=1);
 namespace App;
 
 /**
- * Carrega o índice IVF8 quantizado em int8 e expõe ponteiros (strings binárias
- * + arrays de floats/ints) para o hot path de Knn::score().
+ * Carrega o índice IVF6 quantizado int16 e o expõe via PHP FFI como buffers C.
  *
- * Layout:
- *   magic     "IVF8"     4 B
+ * Layout do arquivo:
+ *   magic     "IVF6"     4 B
  *   n  : u32             4 B
  *   k  : u32             4 B
  *   d  : u32             4 B  (= 14)
- *   centroids f32[d*k]   d*k*4 B   (SoA)
+ *   centroids f32[d*k]   d*k*4 B
  *   offsets   u32[k+1]   (k+1)*4 B
  *   labels    u8[n_pad]  n_pad B
  *   blocks    i16[n_pad*d] n_pad*d*2 B (AoS por slot, LE)
+ *
+ * Os dados são copiados para memória C (via FFI) para que o hot path em
+ * knn.c acesse os vetores com operações nativas SIMD sem overhead de PHP.
  */
 final class Data
 {
-    /** Total de vetores reais (sem padding). */
-    public static int $n = 0;
-    /** Centroides (default 2048). */
-    public static int $k = 0;
-    /** Vetores arredondados para múltiplo de 8 (slots por bloco). */
+    public static int $n       = 0;
+    public static int $k       = 0;
     public static int $paddedN = 0;
 
-    /** @var array<int,float> Centroides em AoS. ci*d + dim */
-    public static array $centroids = [];
+    /** FFI handle carregando knn.so. */
+    public static \FFI $ffi;
 
-    /** @var array<int,int> Início (em vetores) de cada centroide. k+1 entries. */
-    public static array $offsets = [];
-
-    /** Labels (rótulos) crus, 1 byte por vetor (padded). */
-    public static string $labels = '';
-
-    /** Blocos AoS int16 LE: para o vetor i, dim d → 2 bytes em $blocks[(i*14 + d)*2 .. +1]. */
-    public static string $blocks = '';
+    /** float[k * 14] — centroides do IVF. */
+    public static \FFI\CData $cCentroids;
+    /** int16_t[paddedN * 14] — vetores quantizados AoS. */
+    public static \FFI\CData $cBlocks;
+    /** uint8_t[paddedN] — labels. */
+    public static \FFI\CData $cLabels;
+    /** int32_t[k+1] — offsets dos clusters (em blocos de 8 vetores). */
+    public static \FFI\CData $cOffsets;
+    /** float[14] — buffer de query reutilizado por request (1 cópia por worker). */
+    public static \FFI\CData $cQuery;
 
     public static function init(?string $path = null): void
     {
@@ -57,51 +58,78 @@ final class Data
             throw new \RuntimeException("bad magic (expected IVF6, got '$magic')");
         }
 
-        $hdr = unpack('Vn/Vk/Vd', fread($fh, 12));
-        $n = $hdr['n'];
-        $k = $hdr['k'];
-        $d = $hdr['d'];
+        $hdr     = unpack('Vn/Vk/Vd', fread($fh, 12));
+        $n       = (int) $hdr['n'];
+        $k       = (int) $hdr['k'];
+        $d       = (int) $hdr['d'];
         if ($d !== 14) {
             throw new \RuntimeException("expected d=14 got $d");
         }
 
-        $cBytes = $d * $k * 4;
+        /* Lê seções binárias brutas (sem unpack para PHP array). */
+        $cBytes      = $d * $k * 4;
         $centroidsBin = fread($fh, $cBytes);
-        $centroidsArr = unpack('f' . ($d * $k), $centroidsBin);
-        $centroids = array_values($centroidsArr);
-        unset($centroidsBin, $centroidsArr);
 
-        $oBytes = ($k + 1) * 4;
-        $offsetsArr = unpack('V' . ($k + 1), fread($fh, $oBytes));
-        $offsets = array_values($offsetsArr);
-        unset($offsetsArr);
+        $oBytes     = ($k + 1) * 4;
+        $offsetsBin = fread($fh, $oBytes);
 
-        $totalBlocks = (int) $offsets[$k];
-        $paddedN = $totalBlocks * 8;
+        /* Número de blocos total vem do último offset. */
+        $lastOff     = unpack('V', substr($offsetsBin, $k * 4, 4))[1];
+        $totalBlocks = (int) $lastOff;
+        $paddedN     = $totalBlocks * 8;
 
-        $labels = fread($fh, $paddedN);
-
+        $labelsBin  = fread($fh, $paddedN);
         $blocksBytes = $paddedN * $d * 2;
-        // stream o blob de ~84MB sem dobrar de memória
-        $blocks = stream_get_contents($fh, $blocksBytes);
+        $blocksBin   = stream_get_contents($fh, $blocksBytes);
         fclose($fh);
 
-        if ($blocks === false || strlen($blocks) !== $blocksBytes) {
+        if ($blocksBin === false || strlen($blocksBin) !== $blocksBytes) {
             throw new \RuntimeException(
-                "blocks size mismatch: got " . (is_string($blocks) ? strlen($blocks) : 'false') .
+                "blocks size mismatch: got " . (is_string($blocksBin) ? strlen($blocksBin) : 'false') .
                 " want $blocksBytes"
             );
         }
 
-        self::$n = $n;
-        self::$k = $k;
-        self::$paddedN = $paddedN;
-        self::$centroids = $centroids;
-        self::$offsets = $offsets;
-        self::$labels = $labels;
-        self::$blocks = $blocks;
+        /* Carrega a shared library C com o hot path de k-NN. */
+        $ffi = \FFI::cdef(
+            'int knn_fraud_count(
+                const float*   centroids,
+                const int16_t* blocks,
+                const uint8_t* labels,
+                const int32_t* offsets,
+                const float*   query,
+                int k, int fast_nprobe, int full_nprobe
+            );',
+            '/app/lib/knn.so'
+        );
+        self::$ffi = $ffi;
 
-        $ms = (hrtime(true) - $t0) / 1e6;
+        /* Aloca buffers C e copia dados binários do índice. */
+        $nCentroidsEl = $d * $k;                     // número de floats
+        self::$cCentroids = $ffi->new("float[$nCentroidsEl]");
+        \FFI::memcpy(self::$cCentroids, $centroidsBin, $cBytes);
+        unset($centroidsBin);
+
+        self::$cOffsets = $ffi->new("int32_t[" . ($k + 1) . "]");
+        \FFI::memcpy(self::$cOffsets, $offsetsBin, $oBytes);
+        unset($offsetsBin);
+
+        self::$cLabels = $ffi->new("uint8_t[$paddedN]");
+        \FFI::memcpy(self::$cLabels, $labelsBin, $paddedN);
+        unset($labelsBin);
+
+        $nBlocksEl = $paddedN * $d;                  // número de int16_t
+        self::$cBlocks = $ffi->new("int16_t[$nBlocksEl]");
+        \FFI::memcpy(self::$cBlocks, $blocksBin, $blocksBytes);
+        unset($blocksBin);
+
+        self::$cQuery = $ffi->new("float[14]");
+
+        self::$n       = $n;
+        self::$k       = $k;
+        self::$paddedN = $paddedN;
+
+        $ms      = (hrtime(true) - $t0) / 1e6;
         $totalMb = (16 + $cBytes + $oBytes + $paddedN + $blocksBytes) / 1048576;
         fwrite(STDERR, sprintf(
             "[data] loaded %s: n=%d k=%d padded_n=%d (%.2f MB) in %.2f ms\n",
