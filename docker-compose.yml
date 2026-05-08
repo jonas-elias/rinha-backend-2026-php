@@ -1,6 +1,6 @@
 services:
   api1:
-    image: jonaselias/rinha-2026-php:v2
+    image: jonaselias/rinha-2026-php:v3
     hostname: api1
     environment:
       SOCK: /run/sock/api1.sock
@@ -16,7 +16,7 @@ services:
           memory: "165MB"
 
   api2:
-    image: jonaselias/rinha-2026-php:v2
+    image: jonaselias/rinha-2026-php:v3
     hostname: api2
     environment:
       SOCK: /run/sock/api2.sock
