@@ -111,7 +111,7 @@ void free_index(IvfIndex* idx)
 }
 
 #define DIMS        14
-#define MAX_NPROBE  64
+#define MAX_NPROBE  512
 
 static void top_n_centroids(
     const float* __restrict__ centroids,
@@ -242,8 +242,8 @@ int knn_fraud_count(
     top_n_centroids(centroids, query, k, fast_nprobe, probes);
     int count = scan_blocks(blocks, labels, offsets, qi, probes, fast_nprobe);
 
-    /* Edge case: repete com mais probes para casos ambíguos. */
-    if (count == 2 || count == 3) {
+    /* Edge case: repete com mais probes para casos ambíguos (count 2, 3 ou 4). */
+    if (count >= 2 && count <= 4) {
         top_n_centroids(centroids, query, k, full_nprobe, probes);
         count = scan_blocks(blocks, labels, offsets, qi, probes, full_nprobe);
     }

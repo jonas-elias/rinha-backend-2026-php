@@ -11,8 +11,8 @@ namespace App;
  */
 final class Knn
 {
-    private const FAST_NPROBE = 4;
-    private const FULL_NPROBE = 24;
+    private const FAST_NPROBE = 8;
+    private const FULL_NPROBE = 32;
 
     /**
      * @param array<int,float> $vec 14 floats vindos de Vector::vectorize().
